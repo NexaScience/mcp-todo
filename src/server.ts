@@ -181,6 +181,7 @@ export const getServer = (): McpServer => {
   ul { list-style: none; padding: 0; margin: 0; }
   .item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #e0e0e0; }
   .box { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid #888; border-radius: 4px; font-size: 13px; line-height: 1; }
+  .item input[type="checkbox"] { width: 16px; height: 16px; margin: 0; cursor: pointer; }
   .item.done .text { text-decoration: line-through; color: #888; }
   .item.done .box { background: #2e7d32; color: #fff; border-color: #2e7d32; }
   .empty { color: #888; padding: 8px; }
@@ -188,8 +189,171 @@ export const getServer = (): McpServer => {
 </head>
 <body>
   <h1>Todo List</h1>
-  <div class="counts">${done} of ${total} done</div>
-  <ul>${rows}</ul>
+  <div id="todo-counts" class="counts">${done} of ${total} done</div>
+  <ul id="todo-list">${rows}</ul>
+  <script>
+  (function () {
+    "use strict";
+    // SEP-1865 MCP Apps view<->host postMessage JSON-RPC bridge.
+    // Everything below runs in the browser (sandboxed iframe). It is INLINE
+    // vanilla JS with NO imports / NO external scripts (claude.ai CSP-safe).
+    // If the handshake never completes, the server-rendered fallback list
+    // (above) is left untouched.
+    try {
+      var nextId = 1;
+      var pending = new Map();
+
+      function post(msg) {
+        window.parent.postMessage(msg, "*");
+      }
+
+      // Send a JSON-RPC request and resolve with its \`result\`.
+      function request(method, params) {
+        return new Promise(function (resolve, reject) {
+          var id = nextId++;
+          pending.set(id, { resolve: resolve, reject: reject });
+          post({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+        });
+      }
+
+      function notify(method, params) {
+        post({ jsonrpc: "2.0", method: method, params: params || {} });
+      }
+
+      window.addEventListener("message", function (e) {
+        var msg = e.data;
+        if (!msg || msg.jsonrpc !== "2.0") return;
+        // Correlate responses by JSON-RPC id.
+        if (msg.id != null && pending.has(msg.id)) {
+          var p = pending.get(msg.id);
+          pending.delete(msg.id);
+          if (msg.error) p.reject(new Error(msg.error.message || "RPC error"));
+          else p.resolve(msg.result);
+          return;
+        }
+        // Inbound host notifications (ignore-safe; we do not depend on them).
+        if (msg.method === "ui/notifications/tool-result" ||
+            msg.method === "ui/notifications/tool-input") {
+          return;
+        }
+      });
+
+      // Call a server tool; returns the parsed CallToolResult.
+      function callTool(name, args) {
+        return request("tools/call", { name: name, arguments: args || {} });
+      }
+
+      // Pull text out of a CallToolResult.
+      function resultText(res) {
+        if (res && res.content && res.content[0] && res.content[0].type === "text") {
+          return res.content[0].text;
+        }
+        return "";
+      }
+
+      function escapeText(s) {
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      // Re-render the list client-side with interactive checkboxes.
+      function render(items) {
+        var list = document.getElementById("todo-list");
+        var counts = document.getElementById("todo-counts");
+        if (!list) return;
+        while (list.firstChild) list.removeChild(list.firstChild);
+
+        if (!items || items.length === 0) {
+          var empty = document.createElement("li");
+          empty.className = "empty";
+          empty.textContent = "No tasks yet.";
+          list.appendChild(empty);
+        } else {
+          for (var i = 0; i < items.length; i++) {
+            (function (task) {
+              var li = document.createElement("li");
+              li.className = task.completed ? "item done" : "item";
+
+              var cb = document.createElement("input");
+              cb.type = "checkbox";
+              cb.checked = !!task.completed;
+              cb.setAttribute("data-id", task.id);
+
+              var span = document.createElement("span");
+              span.className = "text";
+              span.textContent = task.text;
+
+              cb.addEventListener("change", function () {
+                onToggle(cb);
+              });
+
+              li.appendChild(cb);
+              li.appendChild(span);
+              list.appendChild(li);
+            })(items[i]);
+          }
+        }
+
+        if (counts) {
+          var total = items ? items.length : 0;
+          var done = 0;
+          if (items) {
+            for (var j = 0; j < items.length; j++) {
+              if (items[j].completed) done++;
+            }
+          }
+          counts.textContent = done + " of " + total + " done";
+        }
+      }
+
+      function refresh() {
+        return callTool("get_tasks", { filter: "all" }).then(function (res) {
+          var txt = resultText(res);
+          var items = [];
+          try { items = JSON.parse(txt); } catch (err) { items = []; }
+          render(items);
+          return items;
+        });
+      }
+
+      function onToggle(cb) {
+        var id = cb.getAttribute("data-id");
+        var completed = cb.checked;
+        cb.disabled = true; // disable while the round-trip is in flight
+        callTool("update_task", { id: id, completed: completed })
+          .then(function () { return refresh(); })
+          .catch(function () { /* swallow; keep widget alive */ })
+          .then(function () { cb.disabled = false; });
+      }
+
+      // Handshake, then enter the interactive loop.
+      request("ui/initialize", {
+        protocolVersion: "2026-01-26",
+        clientInfo: { name: "todo-widget", version: "1.0.0" },
+        capabilities: {},
+        appCapabilities: {
+          tools: { listChanged: true },
+          availableDisplayModes: ["inline", "fullscreen"]
+        }
+      }).then(function () {
+        notify("ui/notifications/initialized", {});
+        return refresh();
+      }).catch(function () {
+        // No host / non-supporting client: leave the fallback list as-is.
+      });
+
+      // Silence the unused-var lint for escapeText if a host later wants it
+      // for innerHTML; kept available but DOM uses textContent for safety.
+      void escapeText;
+    } catch (err) {
+      // Never throw uncaught; the server-rendered fallback remains usable.
+    }
+  })();
+  </script>
 </body>
 </html>`;
   };
