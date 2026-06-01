@@ -2,6 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import { type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  registerAppTool,
+  registerAppResource,
+  RESOURCE_MIME_TYPE,
+} from "@modelcontextprotocol/ext-apps/server";
 
 type Task = {
   id: string;
@@ -132,6 +137,92 @@ export const getServer = (): McpServer => {
       const n = tasks.length;
       tasks.length = 0;
       return text(`Cleared ${n} tasks`);
+    },
+  );
+
+  // --- MCP Apps: interactive HTML UI for the todo list (SEP-1865) ---
+  const UI_RESOURCE_URI = "ui://todo/list.html";
+
+  const escapeHtml = (s: string): string =>
+    s.replace(/[&<>"']/g, (c) =>
+      c === "&" ? "&amp;"
+        : c === "<" ? "&lt;"
+        : c === ">" ? "&gt;"
+        : c === '"' ? "&quot;"
+        : "&#39;",
+    );
+
+  const renderTodoHtml = (items: Task[]): string => {
+    const total = items.length;
+    const done = items.filter((x) => x.completed).length;
+    const rows = items.length === 0
+      ? `<li class="empty">No tasks yet.</li>`
+      : items
+          .map((t) => {
+            const box = t.completed ? "✓" : "";
+            const cls = t.completed ? "item done" : "item";
+            return `<li class="${cls}"><span class="box">${box}</span><span class="text">${escapeHtml(t.text)}</span></li>`;
+          })
+          .join("");
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Todo List</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  .counts { color: #666; font-size: 0.9rem; margin-bottom: 12px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  .item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #e0e0e0; }
+  .box { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid #888; border-radius: 4px; font-size: 13px; line-height: 1; }
+  .item.done .text { text-decoration: line-through; color: #888; }
+  .item.done .box { background: #2e7d32; color: #fff; border-color: #2e7d32; }
+  .empty { color: #888; padding: 8px; }
+</style>
+</head>
+<body>
+  <h1>Todo List</h1>
+  <div class="counts">${done} of ${total} done</div>
+  <ul>${rows}</ul>
+</body>
+</html>`;
+  };
+
+  registerAppResource(
+    server,
+    "Todo List UI",
+    UI_RESOURCE_URI,
+    { description: "Interactive HTML view of the current todo list" },
+    async () => ({
+      contents: [
+        {
+          uri: UI_RESOURCE_URI,
+          mimeType: RESOURCE_MIME_TYPE,
+          text: renderTodoHtml(tasks),
+        },
+      ],
+    }),
+  );
+
+  registerAppTool(
+    server,
+    "show_todo_ui",
+    {
+      title: "Show Todo UI",
+      description: "Displays the current todo list as an interactive HTML UI",
+      inputSchema: { filter: z.enum(["all", "pending", "completed"]).optional().describe("Filter by status") },
+      _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+    },
+    async ({ filter }): Promise<CallToolResult> => {
+      const f = filter ?? "all";
+      const filtered = tasks.filter((x) =>
+        f === "all" ? true : f === "completed" ? x.completed : !x.completed,
+      );
+      const done = filtered.filter((x) => x.completed).length;
+      return text(`Showing todo UI: ${filtered.length} tasks (${done} done, ${filtered.length - done} pending).`);
     },
   );
 
