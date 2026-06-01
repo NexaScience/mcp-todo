@@ -16,9 +16,12 @@ type Task = {
   updatedAt: string;
 };
 
-export const getServer = (): McpServer => {
-  const tasks: Task[] = [];
+// Shared in-memory task store at module scope so it persists across the
+// per-request server instances created in stateless Streamable HTTP mode
+// (sessionIdGenerator: undefined). Resets on process restart/redeploy.
+const tasks: Task[] = [];
 
+export const getServer = (): McpServer => {
   const server = new McpServer(
     { name: "mcp-todo-server", version: "1.0.0" },
     { capabilities: {} },
