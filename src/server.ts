@@ -333,7 +333,10 @@ export const getServer = (): McpServer => {
       // Handshake, then enter the interactive loop.
       request("ui/initialize", {
         protocolVersion: "2026-01-26",
-        clientInfo: { name: "todo-widget", version: "1.0.0" },
+        // claude.ai's host expects an appInfo object here (not clientInfo);
+        // sending clientInfo fails ui/initialize with an appInfo invalid_type
+        // error and the widget silently stays on the read-only fallback.
+        appInfo: { name: "todo-widget", version: "1.0.0" },
         capabilities: {},
         appCapabilities: {
           tools: { listChanged: true },
